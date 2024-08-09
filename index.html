@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Run SQL</title>
+    <script src="https://unpkg.com/@antonz/sqlean/dist/sqlean.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/sql/sql.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/theme/monokai.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+            display: flex;
+            justify-content: center;
+        }
+        .left-column, .right-column {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            margin: 0 10px;
+            max-width: 600px;
+            width: 100%;
+        }
+        h1, h2, h3, h4 {
+            color: #333;
+        }
+        .CodeMirror {
+            height: 500px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        hr {
+            margin: 20px 0;
+            border: 0;
+            border-top: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="left-column">
+        <h1>Run SQL</h1>
+        <p>Enter your SQL query in the textarea below and click "Execute SQL" to see the results.</p>
+        <textarea id="sql-input"></textarea>
+        <div>
+            <button onclick="executeSQL()">Execute SQL</button>
+            <button onclick="clearSQL()">Clear</button>
+        </div>
+        <div id="sql-output"></div>
+    </div>
+    <div class="right-column">
+        <h2>Database Schema</h2>
+        <div id="schema-output"></div>
+    </div>
+    
+    <script>
+        let editor;
+        document.addEventListener('DOMContentLoaded', (event) => {
+            editor = CodeMirror.fromTextArea(document.getElementById("sql-input"), {
+                mode: "text/x-sql",
+                theme: "monokai",
+                lineNumbers: true,
+                indentWithTabs: true,
+                smartIndent: true,
+                lineWrapping: true,
+                matchBrackets: true,
+                autofocus: true
+            });
+        });
+
+        async function init() {
+            const sqlite3 = await sqlite3InitModule({
+                print: console.log,
+                printErr: console.error,
+            });
+            const version = sqlite3.capi.sqlite3_libversion();
+            console.log(`Loaded SQLite ${version}`);
+            return sqlite3;
+        }
+        
+        let db;
+        init().then(sqlite3 => {
+            db = new sqlite3.oo1.DB();
+            getSchema();
+        });
+
+        async function executeSQL() {
+            if (!db) {
+                showError('sql-output', 'Database not initialized');
+                return;
+            }
+            const sql = editor.getValue();
+            let rows = [];
+
+            showLoading('sql-output');
+
+            try {
+                db.exec({
+                    sql,
+                    rowMode: "object",
+                    resultRows: rows,
+                });
+                
+                // Clear the loading message
+                document.getElementById('sql-output').innerHTML = '';
+                
+                if (rows.length > 0) {
+                    const table = document.createElement('table');
+                    
+                    // Create table header
+                    const thead = document.createElement('thead');
+                    const headerRow = document.createElement('tr');
+                    Object.keys(rows[0]).forEach(key => {
+                        const th = document.createElement('th');
+                        th.innerText = key;
+                        headerRow.appendChild(th);
+                    });
+                    thead.appendChild(headerRow);
+                    table.appendChild(thead);
+                    
+                    // Create table body
+                    const tbody = document.createElement('tbody');
+                    rows.forEach(row => {
+                        const tr = document.createElement('tr');
+                        Object.values(row).forEach(value => {
+                            const td = document.createElement('td');
+                            td.innerText = value;
+                            tr.appendChild(td);
+                        });
+                        tbody.appendChild(tr);
+                    });
+                    table.appendChild(tbody);
+                    
+                    document.getElementById('sql-output').appendChild(table);
+                } else {
+                    document.getElementById('sql-output').innerText = 'Query executed successfully, but no results were returned.';
+                }
+                await getSchema();
+            } catch (error) {
+                console.error(error);
+                showError('sql-output', error.message);
+            }
+        }
+
+        function clearSQL() {
+            editor.setValue('');
+            document.getElementById('sql-output').innerHTML = '';
+        }
+
+        function showLoading(elementId) {
+            document.getElementById(elementId).innerHTML = '<p>Loading...</p>';
+        }
+
+        function showError(elementId, message) {
+            document.getElementById(elementId).innerHTML = `<p style="color: red;">Error: ${message}</p>`;
+        }
+
+        async function getSchema() {
+            if (!db) {
+                showError('schema-output', 'Database not initialized');
+                return;
+            }
+            const schemaOutput = document.getElementById('schema-output');
+            showLoading('schema-output');
+
+            try {
+                // Get list of tables
+                let tables = [];
+                db.exec({
+                    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlean_define'",
+                    rowMode: "object",
+                    resultRows: tables,
+                });
+
+                if (tables.length === 0) {
+                    showError('schema-output', 'No tables found in the database.');
+                    return;
+                }
+
+                // Clear the loading message
+                schemaOutput.innerHTML = '';
+
+                for (const table of tables) {
+                    const tableDiv = document.createElement('div');
+                    tableDiv.className = 'table-info';
+
+                    const tableName = table.name;
+                    const tableHeader = document.createElement('h3');
+                    tableHeader.innerText = tableName;
+                    tableDiv.appendChild(tableHeader);
+
+                    // Get table schema
+                    let schema = [];
+                    db.exec({
+                        sql: `PRAGMA table_info(${tableName})`,
+                        rowMode: "object",
+                        resultRows: schema,
+                    });
+
+                    if (schema.length > 0) {
+                        const schemaTable = createTable(
+                            ['Column', 'Type', 'Nullable', 'Default', 'Primary Key'], 
+                            schema.map(col => [
+                                col.name, 
+                                col.type, 
+                                col.notnull ? 'No' : 'Yes', 
+                                col.dflt_value || 'NULL',
+                                col.pk ? 'Yes' : 'No'
+                            ])
+                        );
+                        tableDiv.appendChild(schemaTable);
+                    } else {
+                        tableDiv.appendChild(document.createTextNode('No schema information available.'));
+                    }
+
+                    // Get foreign key information
+                    let foreignKeys = [];
+                    db.exec({
+                        sql: `PRAGMA foreign_key_list(${tableName})`,
+                        rowMode: "object",
+                        resultRows: foreignKeys,
+                    });
+
+                    if (foreignKeys.length > 0) {
+                        const fkHeader = document.createElement('h4');
+                        fkHeader.innerText = 'Foreign Keys';
+                        tableDiv.appendChild(fkHeader);
+
+                        const fkTable = createTable(
+                            ['Column', 'References', 'On Delete', 'On Update'],
+                            foreignKeys.map(fk => [
+                                fk.from,
+                                `${fk.table}(${fk.to})`,
+                                fk.on_delete || 'NO ACTION',
+                                fk.on_update || 'NO ACTION'
+                            ])
+                        );
+                        tableDiv.appendChild(fkTable);
+                    }
+
+                    // Get table data
+                    let data = [];
+                    db.exec({
+                        sql: `SELECT * FROM ${tableName}`,
+                        rowMode: "object",
+                        resultRows: data,
+                    });
+
+                    if (data.length > 0) {
+                        const dataHeader = document.createElement('h4');
+                        dataHeader.innerText = 'Data';
+                        tableDiv.appendChild(dataHeader);
+
+                        const dataTable = createTable(Object.keys(data[0]), data.map(Object.values));
+                        tableDiv.appendChild(dataTable);
+                    } else {
+                        tableDiv.appendChild(document.createTextNode('No data available in this table.'));
+                    }
+
+                    if (schemaOutput.lastChild !== tableDiv) {
+                        schemaOutput.appendChild(document.createElement('hr'));
+                    }
+                    schemaOutput.appendChild(tableDiv);
+                }
+            } catch (error) {
+                console.error(error);
+                showError('schema-output', error.message);
+            }
+        }
+
+        function createTable(columns, rows) {
+            const table = document.createElement('table');
+            
+            // Create table header
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            columns.forEach(column => {
+                const th = document.createElement('th');
+                th.innerText = column;
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            
+            // Create table body
+            const tbody = document.createElement('tbody');
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                row.forEach(value => {
+                    const td = document.createElement('td');
+                    td.innerText = value;
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+
+            return table;
+        }
+    </script>
+</body>
+</html>
